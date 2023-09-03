@@ -1,0 +1,702 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2708
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 /*\
+\
+ This program provides the control of three stepper motors, and you can run two at the same time.\
+ It is designed for a DI technical challenge where we are building a maze runner robot.\
+\
+\
+ Created  Oct. 2017\
+ Modified 24 Feb. 2018\
+ by Jacob Vaughn\
+\
+ */\
+\
+#include "IRremote.h"\
+#include <Stepper.h>\
+#include <AccelStepper.h>\
+#include <MultiStepper.h>\
+\
+const int GRND_PIN_12 = 12;\
+const int GRND_PIN_39 = 39;\
+const int GRND_PIN_23 = 23;\
+const int GRND_PIN_22 = 22;\
+const int GRND_PIN_50 = 50;\
+\
+// remote sensor\
+const int RECEIVER = 2; // Signal Pin of IR receiver to Arduino Digital Pin 11\
+\
+//there are two movement types\
+const int MTR_WALKER = 1;\
+const int MTR_TREAD= 2;\
+\
+// length of the movement type in inches\
+const float WALKER_LENGTH = 6.0;\
+const float TREAD_LENGTH = 2.6;\
+\
+// half of the length of the movement type in inches\
+const float WALKER_HALF_LENGTH = WALKER_LENGTH/2;\
+const float TREAD_HALF_LENGTH = TREAD_LENGTH/2;\
+const float WALKER_FOURTH_LENGTH = WALKER_LENGTH/4;\
+\
+//A square in the maze can support no operation, or an extraction or change event\
+const int SQ_NOOP = 0;\
+const int SQ_EXTRACT = 1;\
+const int SQ_CHANGE = 2;\
+const int SQ_TURN = 3;\
+\
+//The arrow support maually usage of the treads and walker\
+const int ARROW_STATE_WALKER = 1; \
+const int ARROW_STATE_TREAD = 2;\
+\
+//The states of the program\
+const int STATE_MANUAL = 1;\
+const int STATE_MAZE = 2;\
+\
+//an array of speeds for each maze\
+const int TREAD_MAZE_SPD[16] = \{ \
+  4000, 4000, 4000, 4000, \
+  4000, 4000, 4000, 4000,\
+  4000, 4000, 4000, 4000,\
+  4000, 4000, 4000, 4000\
+\};\
+\
+const long STEPS_PER_REV = 200;  // the number of steps the motor shaft makes for a complete revoultion\
+const long MTR_LOW_SPD = 2000;\
+\
+const float WALKER_NUM_REVS = 64.0; // represents a full revolution of the walker\
+const float TREAD_NUM_REVS = 12.0;  // represents the defined movement for the treads\
+\
+const int HEADING_CLOCKWISE = 1;\
+const int HEADING_COUNTER_CLOCKWISE = 2;\
+const int HEADING_TURN_LEFT = 3;\
+const int HEADING_TURN_RIGHT = 4;\
+\
+// global varibles\
+long gLngMtrSpeed = MTR_LOW_SPD;\
+long gLngTreadSpeed = TREAD_MAZE_SPD[0];\
+boolean gBlnMoving = false;\
+int gIntState = STATE_MANUAL;\
+int gIntArrowState = ARROW_STATE_WALKER;\
+int gIntMaze = 0;\
+float gFltPosInMaze = 0;\
+String gStrTxtMaze = "";\
+int gIntDir = HEADING_CLOCKWISE;\
+int gIntMoveType = MTR_WALKER;\
+float gFltDist = WALKER_NUM_REVS;\
+\
+// Define the stepper motors for arduino \
+// direction Digital, pulses Digital\
+Stepper gStepperWalker(STEPS_PER_REV, 36, 37);\
+AccelStepper gStepperTread1(AccelStepper::FULL2WIRE, 52, 53);\
+AccelStepper gStepperTread2(AccelStepper::FULL2WIRE, 13, 11);\
+MultiStepper gSteppers;  // handles simultaneous movement of the 2 tread motors\
+\
+IRrecv gIrrecv(RECEIVER);     // create instance of 'irrecv'\
+decode_results gResults; \
+\
+// Class definition describing a move action for the maze runner\
+class MoveAction\
+\{\
+   public:\
+   MoveAction(int intType_, int intStartPos_, int intInches_, int intDir_, int intSqType_) \{\
+    init(intType_, intStartPos_, intInches_, intDir_, intSqType_);\
+   \};\
+   \
+   void init(int intType_, int intStartPos_, int intInches_, int intDir_, int intSqType_) \
+   \{\
+    intType = intType_;\
+    intStartPos = intStartPos_;\
+    intInches = intInches_;\
+    intDir = intDir_;\
+    intSqType = intSqType_;\
+   \};\
+              \
+   private:\
+   int intType;\
+   int intStartPos;\
+   int intInches;\
+   int intDir;\
+   int intSqType;\
+   boolean bSqActCmp = false;\
+   boolean bCmdDone = false;\
+\
+   public:\
+\
+   int getStartPos() \{\
+    return intStartPos;\
+   \}\
+\
+   int getEndPos() \{\
+    return intStartPos + intInches;\
+   \}\
+   int getDist() \{\
+    return intInches;\
+   \}\
+\
+   int getMtrType() \{\
+    return intType;\
+   \}\
+\
+   int getHeading() \{\
+    return intDir; \
+   \}\
+   \
+   int getSqAction() \{\
+    return intSqType;\
+   \}\
+\
+   boolean isAction() \{\
+     return (intSqType == SQ_EXTRACT || intSqType == SQ_CHANGE || intSqType == SQ_TURN) ? true : false;\
+   \}\
+\
+   void setSqActCmp(boolean bSqActCmp_) \{\
+     bSqActCmp = bSqActCmp_;\
+   \}\
+\
+   boolean isSqActCmp() \{\
+     return bSqActCmp;   \
+   \}\
+\
+   boolean isCmdDone() \{\
+    return bCmdDone;\
+   \}\
+\
+   void setCmdDone(boolean bCmdDone_) \{\
+     bCmdDone = bCmdDone_;\
+   \}\
+        \
+\};\
+\
+// an array of all move actions to execute a maze\
+const int MAZE_ACTION_ARRAY_SIZE = 12;\
+MoveAction* gMazeAction[MAZE_ACTION_ARRAY_SIZE] = \{\
+  NULL, NULL, NULL, NULL, NULL,\
+  NULL, NULL, NULL, NULL, NULL,\
+  NULL, NULL\
+\};\
+\
+\
+void setup() \{\
+\
+  // setup ground pins\
+  pinMode(GRND_PIN_22,OUTPUT);\
+  digitalWrite(GRND_PIN_22,LOW);\
+  pinMode(GRND_PIN_23,OUTPUT);\
+  digitalWrite(GRND_PIN_23,LOW);\
+  pinMode(GRND_PIN_39,OUTPUT);\
+  digitalWrite(GRND_PIN_39,LOW);\
+  pinMode(GRND_PIN_50,OUTPUT);\
+  digitalWrite(GRND_PIN_50,LOW);\
+  pinMode(GRND_PIN_12,OUTPUT);\
+  digitalWrite(GRND_PIN_12,LOW);\
+  \
+\
+  Serial.begin(9600);\
+\
+  Serial.println("IR Receiver Button Decode"); \
+  gIrrecv.enableIRIn(); // Start the receiver\
+\
+  // default\
+  gStepperWalker.setSpeed(gLngMtrSpeed);\
+  gStepperTread1.setMaxSpeed(gLngTreadSpeed);\
+  gStepperTread2.setMaxSpeed(gLngTreadSpeed);\
+\
+  gSteppers.addStepper(gStepperTread1);\
+  gSteppers.addStepper(gStepperTread2);\
+\
+\}\
+\
+// the program loops forever performing the following:\
+// 1) get button press\
+// 2) determine action to take based on button press\
+// 3) perform a move action\
+void loop() \{\
+\
+  // 1) get button press\
+  if (gIrrecv.decode(&gResults)) // have we received an IR signal?\
+  \{\
+    // 2) determine action to take based on button press\
+    translateIR(); \
+\
+    gIrrecv.resume(); // receive the next value\
+  \}\
+\
+  // 3) perform a move action\
+  if (gBlnMoving || (gIntMaze > 0)) \{\
+    if (gBlnMoving) \{\
+      Serial.println("bMoving = true");\
+      move(gIntMoveType, gIntDir, gFltDist);\
+      gBlnMoving = false;\
+    \} else \{\
+//    Serial.println("bMoving = true or maze > 0");\
+      mazeEngine();\
+    \}\
+  \}\
+\
+\}\
+\
+// This method will move the specified motor in the appropriate \
+// direction for the specified distance.\
+void move(int mtr, int heading, float numRevs) \{\
+//  Serial.println("move() - START");\
+  // step one revolution  in one direction:\
+\
+  if (mtr == MTR_WALKER) \{\
+    // walker can only go forward or backward\
+    int walkerDir = 1;\
+    if (heading == HEADING_COUNTER_CLOCKWISE || heading == HEADING_TURN_LEFT) \{\
+      walkerDir = -1;\
+    \}\
+    Serial.println("move() - WALKER");\
+    gStepperWalker.step(walkerDir*STEPS_PER_REV*numRevs);\
+  \} else if (mtr == MTR_TREAD) \{\
+    int tread1Dir = 1;\
+    int tread2Dir = -1;\
+    if (heading == HEADING_COUNTER_CLOCKWISE) \{\
+      tread1Dir = -1;\
+      tread2Dir = 1;\
+    \} else if (heading == HEADING_TURN_RIGHT) \{\
+      tread1Dir = 1;\
+      tread2Dir = 1;\
+    \} else if (heading == HEADING_TURN_LEFT) \{\
+      tread1Dir = -1;\
+      tread2Dir = -1;\
+    \}\
+        \
+    long numSteps = STEPS_PER_REV * numRevs;\
+/*\
+    Serial.print("STEPS_PER_REV = ");\
+    Serial.println(STEPS_PER_REV);\
+    Serial.print("numRevs = ");\
+    Serial.println(numRevs);\
+    Serial.print("STEPS_PER_REV * numRevs = ");\
+    Serial.println(STEPS_PER_REV * numRevs);\
+    Serial.print("numSteps = ");\
+    Serial.println(numSteps);\
+*/\
+    Serial.print("tread1Dir = ");\
+    Serial.println(tread1Dir);\
+    Serial.print("tread2Dir = ");\
+    Serial.println(tread2Dir);\
+\
+    long positions[2]; // Array of desired stepper positions\
+\
+    gStepperTread1.setCurrentPosition(0);\
+    gStepperTread2.setCurrentPosition(0);\
+    positions[0] = numSteps * tread1Dir;\
+    positions[1] = numSteps * tread2Dir;\
+    gSteppers.moveTo(positions);\
+    gSteppers.runSpeedToPosition(); // Blocks until all are in position\
+//    Serial.println(stepperTread1.currentPosition());\
+//    Serial.println(stepperTread2.currentPosition());\
+\
+  \}\
+\}\
+\
+// This method processes a numeric button press based on the state.\
+// For state maze, append the number to the string that represents the maze to be run.\
+// For state manual, set type of movement for the arrow selections\
+void mazeDriver(int btnPress)\{\
+    if (isStateMaze()) \{\
+      Serial.print("MAZE: maze selected ");\
+      Serial.println(btnPress, DEC); \
+      appendToMazeNum(btnPress);\
+    \} else if (isStateManual()) \{\
+      if (btnPress == 1) \{\
+        gIntArrowState = ARROW_STATE_WALKER;\
+      \} else if (btnPress == 2) \{\
+        gIntArrowState = ARROW_STATE_TREAD;\
+      \}\
+    \}\
+\}\
+\
+// This method will initialize the actions to complete the selected maze.\
+void initMazeActions()\
+\{\
+\
+  // always start off with memory cleaned up\
+  for (int index = 0; index < MAZE_ACTION_ARRAY_SIZE; index++) \{\
+    if (gMazeAction[index] != NULL) \{\
+      Serial.print("cleaning up index = ");\
+      Serial.println(index);\
+      free(gMazeAction[index]);\
+      gMazeAction[index] = NULL;\
+    \}\
+  \}\
+\
+  if (gIntMaze == 1) \{\
+    gMazeAction[0] = new MoveAction(MTR_TREAD, 0, 12 + 24 + 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_WALKER, gMazeAction[0]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_TREAD, gMazeAction[2]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[4] = new MoveAction(MTR_WALKER, gMazeAction[3]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[7] = new MoveAction(MTR_WALKER, gMazeAction[6]->getEndPos(),96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_TREAD, gMazeAction[7]->getEndPos(),48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_WALKER, gMazeAction[8]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;\
+  \} else if (gIntMaze == 2) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_WALKER, gMazeAction[5]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;\
+  \} else if (gIntMaze == 3) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_WALKER, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_WALKER, gMazeAction[5]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 134, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;\
+  \} else if (gIntMaze == 4) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24 + 48 + 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 12 + 24 + 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_WALKER, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_TREAD, gMazeAction[2]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = new MoveAction(MTR_WALKER, gMazeAction[9]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[11] = NULL;\
+  \} else if (gIntMaze == 5) \{\
+    gMazeAction[0] = new MoveAction(MTR_TREAD, 0, 12 + 24 + 48 + 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_WALKER, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_TREAD, gMazeAction[2]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[4] = new MoveAction(MTR_WALKER, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[7] = new MoveAction(MTR_WALKER, gMazeAction[6]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_TREAD, gMazeAction[7]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_WALKER, gMazeAction[8]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;\
+  \} else if (gIntMaze == 6) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_WALKER, gMazeAction[1]->getEndPos(), 144, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_TREAD, gMazeAction[2]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[6] = new MoveAction(MTR_WALKER, gMazeAction[5]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;\
+  \} else if (gIntMaze == 7) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 34, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[6] = new MoveAction(MTR_WALKER, gMazeAction[5]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 192, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;    \
+  \} else if (gIntMaze == 8) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24 + 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_WALKER, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 144, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;    \
+   \} else if (gIntMaze == 9) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_WALKER, gMazeAction[1]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_TREAD, gMazeAction[2]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_TURN);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_WALKER, gMazeAction[6]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;    \
+   \} else if (gIntMaze == 10) \{\
+    gMazeAction[0] = new MoveAction(MTR_TREAD, 0, 10 + 24 + 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_WALKER, gMazeAction[0]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_TREAD, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_TREAD, gMazeAction[4]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[6] = new MoveAction(MTR_WALKER, gMazeAction[5]->getEndPos(), 144, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[8] = new MoveAction(MTR_TREAD, gMazeAction[7]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[9] = new MoveAction(MTR_WALKER, gMazeAction[8]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL;    \
+   \} else if (gIntMaze == 11) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_WALKER, gMazeAction[1]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 96, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_WALKER, gMazeAction[6]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[8] = new MoveAction(MTR_TREAD, gMazeAction[7]->getEndPos(), 192, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[9] = NULL; \
+  \} else if (gIntMaze == 12) \{\
+    gMazeAction[0] = new MoveAction(MTR_WALKER, 0, 10 + 24 + 144, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[1] = new MoveAction(MTR_TREAD, gMazeAction[0]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[2] = new MoveAction(MTR_WALKER, gMazeAction[1]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[3] = new MoveAction(MTR_WALKER, gMazeAction[2]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_EXTRACT);\
+    gMazeAction[4] = new MoveAction(MTR_TREAD, gMazeAction[3]->getEndPos(), 48, HEADING_COUNTER_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[5] = new MoveAction(MTR_WALKER, gMazeAction[4]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[6] = new MoveAction(MTR_TREAD, gMazeAction[5]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[7] = new MoveAction(MTR_TREAD, gMazeAction[6]->getEndPos(), 96, HEADING_COUNTER_CLOCKWISE, SQ_CHANGE);\
+    gMazeAction[8] = new MoveAction(MTR_WALKER, gMazeAction[7]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_TURN);\
+    gMazeAction[9] = new MoveAction(MTR_TREAD, gMazeAction[8]->getEndPos(), 48, HEADING_CLOCKWISE, SQ_NOOP);\
+    gMazeAction[10] = NULL; \
+  \}\
+\
+\};\
+\
+// This method set the program into Manual mode.\
+// It clears all variables related to running a maze.\
+void setManualState() \{\
+  gIntState = STATE_MANUAL;\
+  gIntMaze = 0;\
+  gBlnMoving = false;\
+  gStrTxtMaze = "";\
+\}\
+\
+boolean isStateManual() \{\
+  return (gIntState == STATE_MANUAL) ? true : false;\
+\}\
+boolean isStateMaze() \{\
+  return (gIntState == STATE_MAZE) ? true : false;\
+\}\
+\
+boolean isArrowStateTread() \{\
+  return (gIntArrowState == ARROW_STATE_TREAD);\
+\}\
+\
+void appendToMazeNum(int appendNumber) \{\
+  gStrTxtMaze = String (gStrTxtMaze + String(appendNumber));\
+\}\
+\
+// This method will determine the next move in executing a maze.\
+// 1) Loop through the actions required for a maze and determine the next action required.\
+// 2) If all actions have been completed, go back to manual mode.  Your work is done.\
+// 3) If this is a maze action that is for extraction or change, pause for a few seconds and set done.\
+// 4) Set the values necessary to perform the next move action.\
+void mazeEngine() \{\
+//  Serial.println("mazeEngine() - START");\
+\
+  int index = 0;\
+  int endPos = 0;\
+  while (gMazeAction[index] != NULL) \{\
+    if (gMazeAction[index]->isCmdDone()) \{\
+      index++;\
+      continue;\
+    \}\
+    endPos = gMazeAction[index]->getEndPos();\
+    int mtrType = gMazeAction[index]->getMtrType();\
+    int halfLength = (mtrType == MTR_WALKER) ? WALKER_HALF_LENGTH : TREAD_HALF_LENGTH;\
+  Serial.print("are we close to the end point - on either side; ");\
+  Serial.print("halfLength = ");\
+  Serial.println(halfLength);\
+    if (gFltPosInMaze > endPos - halfLength && gFltPosInMaze < endPos + halfLength) \{\
+  Serial.println("move to the next command");\
+      gMazeAction[index]->setCmdDone(true);      \
+      gFltPosInMaze = endPos;\
+      index++;\
+      continue;\
+    \}\
+    if (gFltPosInMaze < endPos) \{\
+      break;\
+    \}\
+    index++;\
+  \}\
+\
+  if (gMazeAction[index] == NULL) \{\
+    Serial.println("Wow - the maze is done.  Yay!!");\
+    setManualState();\
+    return;\
+  \}\
+\
+  if (gMazeAction[index]->isAction()) \{\
+    if (!gMazeAction[index]->isSqActCmp()) \{\
+      int sqType = gMazeAction[index]->getSqAction();\
+      if (sqType == SQ_TURN) \{\
+        move(MTR_TREAD, HEADING_TURN_LEFT, TREAD_NUM_REVS*12);\
+      \} else \{\
+        Serial.println("Execting Sq extract or change");\
+        delay(3000);\
+      \}\
+      gMazeAction[index]->setSqActCmp(true);\
+  \
+    \}\
+  \}\
+\
+  Serial.print("maze command in work ");\
+  Serial.println(index + 1);\
+  Serial.print("posInMaze = ");\
+  Serial.println(gFltPosInMaze);\
+  gIntMoveType = gMazeAction[index]->getMtrType();\
+  int intDist = gMazeAction[index]->getDist();\
+  if (gIntMoveType == MTR_TREAD) \{\
+     gFltDist =  TREAD_NUM_REVS * (intDist / TREAD_LENGTH);\
+     gMazeAction[index]->setCmdDone(true);      \
+  \} else \{\
+    gFltDist = WALKER_NUM_REVS;\
+  \} \
+\
+  gBlnMoving = true;\
+  gIntDir = gMazeAction[index]->getHeading();\
+  Serial.print("heading = ");\
+  Serial.println(gMazeAction[index]->getHeading());\
+  \
+  float inchesToMove = (gIntMoveType == MTR_TREAD) ? (float) intDist : WALKER_LENGTH;\
+  gFltPosInMaze += inchesToMove;\
+//  mazeAction[index]->updateCumInchesMoved(inchesToMove);\
+  \
+\}\
+\
+// This method sets the variables to process an arrow button press.\
+void processArrowPress(int heading_) \{\
+    if (isStateManual()) \{      \
+      gBlnMoving = true;\
+      gIntDir = heading_;\
+      gIntMoveType = (isArrowStateTread()) ? MTR_TREAD : MTR_WALKER;\
+    \}   \
+\}\
+\
+// This method is for Remote IR processing\
+// Takes action based on IR code received\
+void translateIR()\
+\{\
+\
+  gFltPosInMaze = 0;\
+  Serial.println(gResults.value, HEX);\
+  switch(gResults.value)\
+  \{\
+  case 0xFFB04F:\
+    Serial.println("# - MAZE 1 - 16");\
+    gIntState = STATE_MAZE;\
+    break;\
+          \
+  case 0xFF6897:  // '*' pressed\
+    Serial.println("* go to manual mode");\
+    if (!isStateManual()) \{\
+      setManualState();\
+    \} \
+    break;\
+          \
+  case 0xFF9867:\
+    mazeDriver(0);\
+    break;\
+  \
+  case 0xFFA25D: \
+    mazeDriver(1);\
+    break;\
+    \
+  case 0xFF629D: \
+    mazeDriver(2);\
+    break;\
+    \
+  case 0xFFE21D: \
+    mazeDriver(3);\
+    break;\
+    \
+  case 0xFF22DD:\
+    mazeDriver(4);\
+    break;\
+    \
+  case 0xFF02FD: \
+    mazeDriver(5);\
+    break;\
+    \
+  case 0xFFC23D: \
+    mazeDriver(6);\
+    break;\
+    \
+  case 0xFFE01F:\
+    mazeDriver(7);\
+    break;\
+    \
+  case 0xFFA857:\
+    mazeDriver(8);\
+    break;\
+    \
+  case 0xFF906F:\
+    mazeDriver(9);\
+    break;\
+\
+  case 0xFF18E7: // up\
+    Serial.println("up");\
+    gFltDist = (isArrowStateTread()) ? TREAD_NUM_REVS : WALKER_NUM_REVS;\
+    processArrowPress(HEADING_CLOCKWISE);\
+    break;\
+      \
+  case 0xFF4AB5: // down\
+    Serial.println("down");\
+    gFltDist = (isArrowStateTread()) ? TREAD_NUM_REVS : WALKER_NUM_REVS;\
+    processArrowPress(HEADING_COUNTER_CLOCKWISE);\
+    break;\
+\
+  case 0xFF5AA5: // right\
+    gFltDist = (isArrowStateTread()) ? TREAD_NUM_REVS : WALKER_NUM_REVS * .25;\
+    processArrowPress(HEADING_TURN_RIGHT);\
+    break;\
+\
+  case 0xFF10EF: // left\
+    gFltDist = (isArrowStateTread()) ? TREAD_NUM_REVS : WALKER_NUM_REVS * .25;\
+    processArrowPress(HEADING_TURN_LEFT);\
+    break;\
+\
+  case 0xFF38C7: // OK\
+    if (isStateMaze()) \{\
+      Serial.print("OK - Maze selection complete; maze = ");\
+      Serial.println(gStrTxtMaze);\
+      gIntMaze = gStrTxtMaze.toInt();\
+      gStrTxtMaze = "";\
+      if (gIntMaze > 0 && gIntMaze < 17) \{\
+        initMazeActions();\
+        //move(MTR_WALKER, HEADING_CLOCKWISE, WALKER_NUM_REVS/4);\
+        mazeEngine();\
+      \} else \{\
+        Serial.println("invalid maze; go back to manual state");\
+        setManualState();\
+      \}\
+    \}\
+    break;\
+    \
+  default: \
+    Serial.println(" other button   ");\
+\
+  \}// End Case\
+  //Serial.println(speed, DEC);\
+\
+  delay(50); // Do not get immediate repeat\
+\
+\}\
+\
+}
